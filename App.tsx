@@ -7,7 +7,7 @@ import {
   FolderOpen, Plus, Trash2, Edit2, Maximize2, Minimize2, RotateCcw,
   GitCommit, ChevronDown, Clock, Code as CodeIcon, Terminal as TerminalIcon,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Download, ScanSearch,
-  Paperclip, Image as ImageIcon, X
+  Paperclip, Image as ImageIcon, X, Server, Layout, Database, Globe
 } from 'lucide-react';
 import Editor from './components/Editor';
 import Preview from './components/Preview';
@@ -275,8 +275,8 @@ export default function App() {
     if (!settings.model) return;
     setIsGenerating(true);
     addLog('info', 'Generating README...');
-    const appCode = files.find(f => f.name === 'App.tsx')?.content || '';
-    const docPrompt = `Generate a technical README.md for this React code:\n\`\`\`tsx\n${appCode}\n\`\`\``;
+    const appCode = files.find(f => f.name === 'src/App.tsx' || f.name === 'App.tsx')?.content || '';
+    const docPrompt = `Generate a technical README.md for this project (Frontend+Backend):\n\`\`\`tsx\n${appCode}\n\`\`\``;
     try {
         const response = await generateCode(settings.model, docPrompt, "Expert Doc.", settings);
         const readmeContent = extractCodeFromResponse(response) || response;
@@ -320,8 +320,10 @@ export default function App() {
       ## Global Objective
       [One sentence describing exactly what this application does]
 
-      ## Data Architecture
-      [Analyze the main interfaces, types, and how data flows between components]
+      ## Full Stack Architecture
+      * **Frontend**: [Describe UI components]
+      * **Backend**: [Describe API endpoints in server/]
+      * **Data**: [Describe models]
 
       ## Logic Flow Analysis
       * **External Connections:** [How are APIs, props, or external services handled?]
@@ -385,7 +387,7 @@ export default function App() {
     `;
 
     try {
-        const response = await generateCode(settings.model, securityPrompt, "You are a Cyber Security Expert and Senior React Auditor.", settings);
+        const response = await generateCode(settings.model, securityPrompt, "You are a Cyber Security Expert and Senior React/Node Auditor.", settings);
         const content = extractCodeFromResponse(response) || response;
         
         upsertFile('SECURITY.md', content, 'markdown');
@@ -426,7 +428,10 @@ export default function App() {
     systemPrompt += `\nITERATION MODE: Modify the current code based on the request. RETURN THE FULL CODE.`;
     if (settings.thinkingMode) systemPrompt += "\nUse Chain of Thought.\n";
 
-    let fullPrompt = `Code (App.tsx):\n\`\`\`tsx\n${currentCode}\n\`\`\`\n\nRequest : ${userMsg.content}`;
+    // IMPORTANT : On donne tout le contexte des fichiers pour que l'IA comprenne le Full Stack
+    const fullContext = files.map(f => `// --- File: ${f.name} ---\n${f.content}`).join('\n\n');
+    let fullPrompt = `Files Context:\n${fullContext}\n\nCURRENT FILE FOCUSED: ${files[activeFileIndex].name}\n\nRequest : ${userMsg.content}`;
+    
     if (userMsg.image) {
         fullPrompt += "\n[IMAGE ATTACHED] Use the attached image as visual context/reference for the changes.";
     }
@@ -434,7 +439,6 @@ export default function App() {
     addLog('info', `Generating v${versions.length + 1}...`);
 
     try {
-      // Envoi de l'image (si présente) sous forme de tableau
       const imagesToSend = userMsg.image ? [userMsg.image] : [];
       
       const responseText = await generateCode(
@@ -453,14 +457,8 @@ export default function App() {
       
       const extractedCode = extractCodeFromResponse(responseText);
 
-      // Extract the summary (everything EXCEPT the code block)
       let summaryText = responseText.replace(/```(?:tsx|typescript|javascript|jsx|markdown|md)?\s*([\s\S]*?)\s*```/g, '').trim();
-      
-      // Clean up thinking block from summary if present in the text part
-      if (settings.thinkingMode && thinkingContent) {
-          summaryText = summaryText.replace(thinkingContent, '').trim();
-      }
-
+      if (settings.thinkingMode && thinkingContent) summaryText = summaryText.replace(thinkingContent, '').trim();
       if (!summaryText) summaryText = "Code updated.";
 
       if (extractedCode) {
@@ -468,9 +466,44 @@ export default function App() {
            addLog('error', 'Security : Secrets detected.');
            setChatHistory(prev => [...prev, { role: 'assistant', content: "Code blocked (secrets detected).", thinking: thinkingContent, timestamp: Date.now() }]);
         } else {
-            updateActiveFile(extractedCode);
+            // -- LOGIQUE DE CIBLAGE DE FICHIER AMÉLIORÉE --
+            let targetFileIndex = activeFileIndex;
+            const activeFile = files[activeFileIndex];
+
+            // Heuristique : si le code généré est du backend
+            if (extractedCode.includes("import express") || extractedCode.includes("require('express')")) {
+                // Si l'utilisateur est déjà sur un fichier backend, on reste dessus (pour permettre l'édition de modules)
+                if (activeFile.name.startsWith('server/')) {
+                    // On garde targetFileIndex tel quel
+                } else {
+                    // Sinon on cherche un point d'entrée par défaut
+                    const serverIdx = files.findIndex(f => f.name.includes('server/index') || f.name.includes('server/app'));
+                    if (serverIdx !== -1) {
+                        targetFileIndex = serverIdx;
+                        addLog('info', 'Auto-targeting server entry...');
+                    }
+                }
+            } else if (extractedCode.includes("export default function App") || extractedCode.includes("react-dom/client")) {
+                // Si c'est le point d'entrée React
+                const appIdx = files.findIndex(f => f.name.includes('src/App') || f.name === 'App.tsx');
+                if (appIdx !== -1) {
+                    targetFileIndex = appIdx;
+                    addLog('info', 'Auto-targeting frontend App...');
+                }
+            }
+
+            const newFiles = [...files];
+            newFiles[targetFileIndex] = { ...newFiles[targetFileIndex], content: extractedCode };
+            updateFilesState(newFiles);
+
             createVersion(extractedCode, userPromptText);
-            addLog('success', `v${versions.length + 1} applied.`);
+            addLog('success', `v${versions.length + 1} applied to ${newFiles[targetFileIndex].name}.`);
+            
+            // Si on a changé un autre fichier que celui visible, on switch
+            if (targetFileIndex !== activeFileIndex) {
+                setActiveFileIndex(targetFileIndex);
+            }
+
             if (settings.autoTest) setTimeout(() => addLog('success', 'Tests OK'), 1500);
             setChatHistory(prev => [...prev, { role: 'assistant', content: summaryText, thinking: thinkingContent, timestamp: Date.now() }]);
         }
@@ -486,7 +519,6 @@ export default function App() {
   const handleSaveConfig = (newSettings: Settings) => { setSettings(newSettings); initConnection(newSettings); };
 
   // --- Composants Internes de Layout ---
-  // TRANSFORMATION EN VARIABLES POUR ÉVITER LE REMOUNT
   
   const sidebarContent = (
     <div className="h-full bg-slate-950 flex flex-col border-r border-slate-800">
@@ -499,7 +531,7 @@ export default function App() {
                 <h1 className="font-bold text-lg tracking-tight text-white">Vibe</h1>
             </div>
             <div className="flex gap-1">
-                <Tooltip content="Export ZIP">
+                <Tooltip content="Export ZIP (Full Stack)">
                     <button onClick={handleExport} className="p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors">
                         <Download size={18} />
                     </button>
@@ -514,7 +546,7 @@ export default function App() {
 
         {/* File Explorer */}
         <div className="flex-1 overflow-y-auto p-2">
-            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-2 mt-2">Files</div>
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-2 mt-2">Source</div>
             {files.map((file, idx) => (
                 <button
                     key={file.name}
@@ -523,9 +555,15 @@ export default function App() {
                         activeFileIndex === idx ? 'bg-blue-600/10 text-blue-400 border border-blue-600/20' : 'hover:bg-slate-800 text-slate-400'
                     }`}
                 >
-                   {file.name === '.assistantrules' ? <Brain size={14} /> : 
-                    file.name.endsWith('.md') ? <Book size={14} /> : <FileText size={14} />}
-                   {file.name}
+                   {/* Logic d'icônes intelligente */}
+                   {file.name.includes('server/') ? <Server size={14} className="text-purple-400" /> :
+                    file.name.includes('src/') ? <Layout size={14} className="text-blue-400" /> :
+                    file.name === '.assistantrules' ? <Brain size={14} className="text-pink-400" /> : 
+                    file.name.endsWith('.md') ? <Book size={14} className="text-yellow-400" /> : 
+                    <FileText size={14} />}
+                   
+                   {/* Affichage nom nettoyé */}
+                   <span className="truncate">{file.name}</span>
                 </button>
             ))}
 
@@ -566,7 +604,8 @@ export default function App() {
       <div className="h-full flex flex-col bg-[#1e1e1e]">
          <div className="h-9 flex items-center justify-between px-4 bg-[#252526] border-b border-black">
              <span className="text-xs font-medium text-slate-400 flex items-center gap-2">
-                 <FileCode size={14} /> {files[activeFileIndex].name}
+                 {files[activeFileIndex].name.includes('server') ? <Server size={14} className="text-purple-400"/> : <FileCode size={14} />}
+                 {files[activeFileIndex].name}
              </span>
              <button onClick={() => setIsCodeVisible(false)} className="text-slate-500 hover:text-white" title="Hide code">
                  <PanelLeftClose size={14} />
@@ -590,7 +629,7 @@ export default function App() {
             <div className="bg-slate-900/90 backdrop-blur-md text-xs px-3 py-1.5 rounded-full border border-slate-700 text-slate-300 flex items-center gap-3 shadow-xl">
                     <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                    Preview
+                    Preview (UI Only)
                     </div>
                     <div className="h-3 w-[1px] bg-slate-600"></div>
                     <div className="flex items-center gap-1">
@@ -606,7 +645,7 @@ export default function App() {
             </div>
           </div>
           <div className="flex-1 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] bg-slate-950">
-             <Preview key={previewKey} code={files.find(f => f.name === 'App.tsx')?.content || ''} />
+             <Preview key={previewKey} files={files} />
           </div>
       </div>
   );
@@ -773,7 +812,7 @@ export default function App() {
                     </div>
                     
                     <div className="flex items-center gap-2">
-                         {/* Actions Rapides */}
+                         {/* Actions Rapides - Docs, Specs, Security */}
                          <div className="flex items-center bg-slate-800 rounded-md p-0.5 border border-slate-700 mr-2">
                             <Tooltip content="Readme">
                                 <button onClick={handleGenerateReadme} disabled={isGenerating} className="p-1.5 text-slate-400 hover:text-white rounded hover:bg-slate-700"><Book size={16} /></button>

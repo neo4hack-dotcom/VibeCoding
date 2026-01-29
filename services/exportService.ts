@@ -1,47 +1,73 @@
+
 import JSZip from 'jszip';
 import { Project, FileData } from '../types';
 
 export const exportProjectToZip = async (project: Project) => {
   const zip = new JSZip();
 
-  // 1. Fichiers de configuration (Scaffolding Vite + React + Tailwind)
+  // --- CONFIGURATION DU PROJET FULL STACK ---
   
-  // package.json
+  // package.json unique pour la racine (Monorepo simplifié)
   const packageJson = {
     "name": project.name.toLowerCase().replace(/\s+/g, '-'),
-    "private": true,
-    "version": "0.0.1",
-    "type": "module",
+    "version": "1.0.0",
+    "type": "module", // CORRECTION CRITIQUE: Force le mode ESM pour Node.js et Vite
     "scripts": {
-      "dev": "vite",
+      "dev": "concurrently \"npm run server\" \"npm run client\"",
+      "client": "vite",
+      "server": "tsx watch server/index.ts", // UTILISATION DE TSX (plus robuste que ts-node pour ESM)
       "build": "tsc && vite build",
-      "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
       "preview": "vite preview"
     },
     "dependencies": {
-      "lucide-react": "^0.292.0",
+      // Backend Core
+      "express": "^4.18.2",
+      "cors": "^2.8.5",
+      "dotenv": "^16.3.1",
+      
+      // Database Drivers
+      "mongoose": "^8.0.3",
+      "pg": "^8.11.3",
+      "mysql2": "^3.6.5",
+      "oracledb": "^6.3.0",
+      "@clickhouse/client": "^0.2.6",
+      "@elastic/elasticsearch": "^8.11.0",
+      "@opensearch-project/opensearch": "^2.5.0",
+      "ioredis": "^5.3.2",
+
+      // Frontend Core
       "react": "^18.2.0",
-      "react-dom": "^18.2.0"
+      "react-dom": "^18.2.0",
+      "lucide-react": "^0.292.0",
+      "framer-motion": "^10.16.4",
+      "recharts": "^2.10.3"
     },
     "devDependencies": {
+      // Dev Tools
+      "concurrently": "^8.2.2",
+      "tsx": "^4.7.1", // REMPLACEMENT DE TS-NODE PAR TSX
+      // Build Tools
+      "@types/node": "^20.10.5",
       "@types/react": "^18.2.43",
       "@types/react-dom": "^18.2.17",
+      "@types/express": "^4.17.21",
+      "@types/cors": "^2.8.17",
       "@vitejs/plugin-react": "^4.2.1",
       "autoprefixer": "^10.4.16",
       "postcss": "^8.4.32",
       "tailwindcss": "^3.4.0",
-      "typescript": "^5.2.2",
+      "typescript": "^5.3.3",
       "vite": "^5.0.8"
     }
   };
   zip.file("package.json", JSON.stringify(packageJson, null, 2));
 
-  // tsconfig.json
+  // tsconfig.json (Configuration mise à jour pour ESM/NodeNext)
   const tsConfig = {
     "compilerOptions": {
-      "target": "ES2020",
+      "target": "ES2022",
       "useDefineForClassFields": true,
-      "lib": ["ES2020", "DOM", "DOM.Iterable"],
+      "lib": ["ES2022", "DOM", "DOM.Iterable"],
       "module": "ESNext",
       "skipLibCheck": true,
       "moduleResolution": "bundler",
@@ -51,26 +77,14 @@ export const exportProjectToZip = async (project: Project) => {
       "noEmit": true,
       "jsx": "react-jsx",
       "strict": true,
-      "noUnusedLocals": true,
-      "noUnusedParameters": true,
-      "noFallthroughCasesInSwitch": true
+      "noUnusedLocals": false,
+      "noUnusedParameters": false,
+      "noFallthroughCasesInSwitch": true,
+      "esModuleInterop": true
     },
-    "include": ["src"],
-    "references": [{ "path": "./tsconfig.node.json" }]
+    "include": ["src", "server"],
   };
   zip.file("tsconfig.json", JSON.stringify(tsConfig, null, 2));
-
-  // tsconfig.node.json
-  zip.file("tsconfig.node.json", JSON.stringify({
-    "compilerOptions": {
-      "composite": true,
-      "skipLibCheck": true,
-      "module": "ESNext",
-      "moduleResolution": "bundler",
-      "allowSyntheticDefaultImports": true
-    },
-    "include": ["vite.config.ts"]
-  }, null, 2));
 
   // vite.config.ts
   zip.file("vite.config.ts", `import { defineConfig } from 'vite'
@@ -79,6 +93,14 @@ import react from '@vitejs/plugin-react'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      }
+    }
+  }
 })
 `);
 
@@ -96,16 +118,8 @@ export default {
 }
 `);
 
-  // postcss.config.js
-  zip.file("postcss.config.js", `export default {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {},
-  },
-}
-`);
+  zip.file("postcss.config.js", `export default { plugins: { tailwindcss: {}, autoprefixer: {}, }, }`);
 
-  // index.html
   zip.file("index.html", `<!doctype html>
 <html lang="en">
   <head>
@@ -115,19 +129,20 @@ export default {
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/src/App.tsx"></script> 
   </body>
 </html>
-`);
+`); 
 
-  // 2. Dossier SRC
-  const src = zip.folder("src");
-  if (!src) throw new Error("Impossible de créer le dossier src");
+  // --- TRAITEMENT DES FICHIERS ---
+  
+  const srcFolder = zip.folder("src");
+  const serverFolder = zip.folder("server");
 
-  // main.tsx (Entry point)
-  src.file("main.tsx", `import React from 'react'
+  // Création d'un entry point React standard
+  srcFolder?.file("main.tsx", `import React from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App.tsx'
+import App from './App'
 import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -136,35 +151,44 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   </React.StrictMode>,
 )
 `);
+  srcFolder?.file("index.css", `@tailwind base; @tailwind components; @tailwind utilities;`);
 
-  // index.css (Tailwind directives)
-  src.file("index.css", `@tailwind base;
-@tailwind components;
-@tailwind utilities;
-`);
-
-  // 3. Fichiers du projet utilisateur
   project.files.forEach((file: FileData) => {
-    // On ignore les fichiers systèmes comme .assistantrules pour le build final
-    // ou on les met à la racine si c'est des fichiers de config/doc
-    if (file.name === 'App.tsx') {
-        src.file(file.name, file.content);
-    } else if (file.name.endsWith('.tsx') || file.name.endsWith('.ts') || file.name.endsWith('.css')) {
-        src.file(file.name, file.content);
+    // Nettoyage du nom de fichier
+    const cleanName = file.name.replace(/^\.\//, '');
+
+    if (cleanName.startsWith('server/')) {
+        const fileName = cleanName.replace('server/', '');
+        serverFolder?.file(fileName, file.content);
+    } else if (cleanName.startsWith('src/')) {
+        const fileName = cleanName.replace('src/', '');
+        srcFolder?.file(fileName, file.content);
+    } else if (cleanName === 'App.tsx') {
+        srcFolder?.file('App.tsx', file.content);
+    } else if (cleanName.endsWith('.md') || cleanName.endsWith('.json')) {
+        zip.file(cleanName, file.content);
     } else {
-        // Markdown, JSON, etc à la racine
-        zip.file(file.name, file.content);
+        if (cleanName.endsWith('.tsx') || cleanName.endsWith('.ts') || cleanName.endsWith('.css')) {
+            srcFolder?.file(cleanName, file.content);
+        }
     }
   });
 
-  // 4. Génération et téléchargement
+  // .env exemple
+  zip.file(".env", `PORT=3000
+# DATABASE CONNECTIONS
+DATABASE_URL=postgres://user:pass@localhost:5432/myapp
+MONGO_URI=mongodb://localhost:27017/myapp
+CLICKHOUSE_URL=http://localhost:8123
+ELASTIC_NODE=http://localhost:9200
+ORACLE_CONN_STRING=localhost:1521/XEPDB1`);
+
+  // Génération
   const blob = await zip.generateAsync({ type: "blob" });
-  
-  // Création du lien de téléchargement
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${project.name.replace(/\s+/g, '_')}.zip`;
+  a.download = `${project.name.replace(/\s+/g, '_')}_FullStack.zip`;
   document.body.appendChild(a);
   a.click();
   window.URL.revokeObjectURL(url);
