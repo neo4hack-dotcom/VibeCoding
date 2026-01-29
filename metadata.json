@@ -1,0 +1,5 @@
+{
+  "name": "Vibe Coding Agentic IDE",
+  "description": "An AI-assisted development environment (Ollama) with real-time preview, personas, and agentic tools.",
+  "requestFramePermissions": []
+}
