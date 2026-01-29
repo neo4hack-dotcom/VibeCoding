@@ -7,7 +7,8 @@ import {
   FolderOpen, Plus, Trash2, Edit2, Maximize2, Minimize2, RotateCcw,
   GitCommit, ChevronDown, Clock, Code as CodeIcon, Terminal as TerminalIcon,
   MessageSquare, PanelLeftClose, PanelLeftOpen, Download, ScanSearch,
-  Paperclip, Image as ImageIcon, X, Server, Layout, Database, Globe
+  Paperclip, Image as ImageIcon, X, Server, Layout, Database, Globe,
+  Upload, Github
 } from 'lucide-react';
 import Editor from './components/Editor';
 import Preview from './components/Preview';
@@ -16,7 +17,7 @@ import Tooltip from './components/Tooltip';
 import ConfigModal from './components/ConfigModal';
 import ResizableSplitter from './components/ResizableSplitter';
 import { 
-  FileData, ChatMessage, Settings, Persona, TerminalLog, Project, CodeVersion
+  FileData, ChatMessage, Settings, Persona, TerminalLog, Project, CodeVersion, ProjectBackup
 } from './types';
 import { 
   DEFAULT_FILES, PERSONA_PROMPTS, BASE_SYSTEM_PROMPT 
@@ -24,9 +25,10 @@ import {
 import { 
   getModels, generateCode, extractCodeFromResponse, detectSecrets 
 } from './services/ollamaService';
-import { exportProjectToZip } from './services/exportService';
+import { 
+  exportProjectToZip, downloadBackup, parseBackupFile, publishToGitHub 
+} from './services/exportService';
 
-// Composant Helper pour les icônes de chargement
 const Loader = () => <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>;
 
 export default function App() {
@@ -42,9 +44,9 @@ export default function App() {
   
   // --- Layout & UI ---
   const [isConfigOpen, setIsConfigOpen] = useState(false);
-  const [isCodeVisible, setIsCodeVisible] = useState(false); // Code masqué par défaut
+  const [isCodeVisible, setIsCodeVisible] = useState(false);
   const [isSidebarVisible, setIsSidebarVisible] = useState(true);
-  const [activeBottomTab, setActiveBottomTab] = useState<'chat' | 'terminal'>('chat'); // Onglets du bas
+  const [activeBottomTab, setActiveBottomTab] = useState<'chat' | 'terminal'>('chat');
   const [isPreviewFullScreen, setIsPreviewFullScreen] = useState(false);
   
   const [settings, setSettings] = useState<Settings>({
@@ -63,11 +65,11 @@ export default function App() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [logs, setLogs] = useState<TerminalLog[]>([]);
   
-  // --- Gestion des Images (Vision) ---
-  const [attachedImage, setAttachedImage] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // --- Inputs Refs ---
+  const fileInputRef = useRef<HTMLInputElement>(null); // Pour images
+  const importInputRef = useRef<HTMLInputElement>(null); // Pour Import JSON
 
-  // --- Gestion des Versions ---
+  const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const [versions, setVersions] = useState<CodeVersion[]>([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
@@ -98,7 +100,6 @@ export default function App() {
     }
     initConnection(initialSettings);
     
-    // Auto switch to terminal tab on error
     const handleLogsChange = () => {
          if (logs.length > 0 && logs[logs.length-1].type === 'error') {
              setActiveBottomTab('terminal');
@@ -109,13 +110,6 @@ export default function App() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
-
-  useEffect(() => {
-      // Auto-switch tab si erreur récente (optionnel, UX)
-      if (logs.length > 0 && logs[logs.length-1].type === 'error') {
-          // setActiveBottomTab('terminal'); // Peut être intrusif, laissé commenté
-      }
-  }, [logs]);
 
   const handleClickOutside = (event: MouseEvent) => {
         if (historyRef.current && !historyRef.current.contains(event.target as Node)) {
@@ -240,18 +234,96 @@ export default function App() {
     addLog('info', 'Reload preview...');
   };
 
-  const handleExport = async () => {
+  // --- IMPORT / EXPORT / GITHUB ---
+
+  const handleExportZip = async () => {
     if (!currentProjectId) return;
     const project = projects.find(p => p.id === currentProjectId);
     if (!project) return;
-
-    addLog('info', 'Preparing ZIP...');
+    addLog('info', 'Preparing Deployment ZIP...');
     try {
         await exportProjectToZip(project);
-        addLog('success', 'Project exported (ZIP).');
+        addLog('success', 'Exported for Deployment.');
     } catch (e: any) {
         addLog('error', 'Export error: ' + e.message);
     }
+  };
+
+  const handleBackupJson = () => {
+      if (!currentProjectId) return;
+      const project = projects.find(p => p.id === currentProjectId);
+      if (!project) return;
+      
+      addLog('info', 'Saving Full Project State...');
+      const backup: ProjectBackup = {
+          version: 1,
+          timestamp: Date.now(),
+          project: project,
+          chatHistory,
+          versions,
+          settings,
+          logs
+      };
+      downloadBackup(backup);
+      addLog('success', 'Project Backup Saved (.json).');
+  };
+
+  const handleImportClick = () => importInputRef.current?.click();
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      
+      addLog('info', 'Importing project...');
+      try {
+          const backup = await parseBackupFile(file);
+          
+          // Restaurer l'état
+          setProjects(prev => {
+              // Si le projet existe déjà, on le remplace, sinon on l'ajoute
+              const existingIdx = prev.findIndex(p => p.id === backup.project.id);
+              if (existingIdx >= 0) {
+                  const newProjs = [...prev];
+                  newProjs[existingIdx] = backup.project;
+                  return newProjs;
+              }
+              return [backup.project, ...prev];
+          });
+          
+          setCurrentProjectId(backup.project.id);
+          setFiles(backup.project.files);
+          setChatHistory(backup.chatHistory);
+          setVersions(backup.versions);
+          setLogs(backup.logs);
+          setSettings(backup.settings); // Restaure aussi la config
+          
+          setPreviewKey(prev => prev + 1);
+          addLog('success', `Imported: ${backup.project.name}`);
+
+          // Reset input
+          if (importInputRef.current) importInputRef.current.value = '';
+
+      } catch (err: any) {
+          addLog('error', 'Import failed: ' + err.message);
+      }
+  };
+
+  const handleGithubPush = async () => {
+      if (!settings.github?.token) {
+          addLog('error', 'GitHub token missing. Check Settings.');
+          setIsConfigOpen(true);
+          return;
+      }
+      const project = projects.find(p => p.id === currentProjectId);
+      if (!project) return;
+
+      addLog('info', 'Pushing to GitHub...');
+      try {
+          const msg = await publishToGitHub(settings, project, `Vibe Update: ${new Date().toLocaleString()}`);
+          addLog('success', msg);
+      } catch (e: any) {
+          addLog('error', 'GitHub Push Failed: ' + e.message);
+      }
   };
 
   // --- Gestion des Images ---
@@ -261,7 +333,6 @@ export default function App() {
           const reader = new FileReader();
           reader.onloadend = () => {
               setAttachedImage(reader.result as string);
-              // Reset l'input pour permettre de resélectionner le même fichier si besoin
               if (fileInputRef.current) fileInputRef.current.value = '';
           };
           reader.readAsDataURL(file);
@@ -308,54 +379,32 @@ export default function App() {
     setIsGenerating(true);
     addLog('info', 'Analyzing codebase for SPECS...');
     
-    // Concaténer tout le code pour analyse
     const codebaseContext = files.map(f => `// File: ${f.name}\n${f.content}`).join('\n\n');
     
     const specPrompt = `
       Analyze the provided codebase and generate a functional specification document in Markdown format (SPECS.md).
       You must strictly follow this structure and language (English):
-
       # Application Specification
-
       ## Global Objective
-      [One sentence describing exactly what this application does]
-
       ## Full Stack Architecture
-      * **Frontend**: [Describe UI components]
-      * **Backend**: [Describe API endpoints in server/]
-      * **Data**: [Describe models]
-
       ## Logic Flow Analysis
-      * **External Connections:** [How are APIs, props, or external services handled?]
-      * **Data Transformation:** [Key calculations, state mutations, aggregations]
-
       ## User Experience (UX)
-      [Describe the main user interactions: Drag & drop, forms, clicks, feedback]
-
       ## Tech Stack
-      [List libraries used and their specific role in this code]
-
       ## Points of Attention
-      [Identify potential limits: Security, Performance, Scalability based on the code]
-
       ---
       Codebase:
       ${codebaseContext}
     `;
 
     try {
-        const response = await generateCode(settings.model, specPrompt, "You are a Senior Technical Writer and Code Analyst.", settings);
-        // On prend le contenu complet, ou le bloc markdown si l'IA l'encapsule
+        const response = await generateCode(settings.model, specPrompt, "You are a Senior Technical Writer.", settings);
         const content = extractCodeFromResponse(response) || response;
-        
         upsertFile('SPECS.md', content, 'markdown');
         addLog('success', 'SPECS.md generated.');
-        setIsCodeVisible(true); // Show file list
+        setIsCodeVisible(true); 
     } catch (e: any) {
         addLog('error', 'Spec gen failed: ' + e.message);
-    } finally {
-        setIsGenerating(false);
-    }
+    } finally { setIsGenerating(false); }
   };
 
   const handleGenerateSecurityAudit = async () => {
@@ -364,40 +413,28 @@ export default function App() {
     addLog('info', 'Running Security/Risk Analysis...');
     
     const codebaseContext = files.map(f => `// File: ${f.name}\n${f.content}`).join('\n\n');
-    
     const securityPrompt = `
-      Analyze the provided codebase for security vulnerabilities, technical risks, and bad practices.
+      Analyze the provided codebase for security vulnerabilities.
       Generate a detailed SECURITY.md report in English.
-
       Structure:
-      1. **Executive Summary**: Brief overview of the security posture.
-      2. **Risk Analysis**:
-         - Cyber Security Risks (XSS, Injection, Secrets, CSRF, etc.)
-         - Data Leaks & Privacy Risks
-         - Component/Dependency Risks
-      3. **Code Quality & Reliability**:
-         - Potential Crashes / Unhandled Errors
-         - Performance Bottlenecks
-         - React Anti-patterns
-      4. **Recommendations**: Concrete steps to fix the issues.
-      5. **Risk Score**: 0 (Critical) to 100 (Safe).
-
+      1. Executive Summary
+      2. Risk Analysis (Cyber, Data, Dependencies)
+      3. Code Quality & Reliability
+      4. Recommendations
+      5. Risk Score (0-100)
       Codebase:
       ${codebaseContext}
     `;
 
     try {
-        const response = await generateCode(settings.model, securityPrompt, "You are a Cyber Security Expert and Senior React/Node Auditor.", settings);
+        const response = await generateCode(settings.model, securityPrompt, "You are a Cyber Security Expert.", settings);
         const content = extractCodeFromResponse(response) || response;
-        
         upsertFile('SECURITY.md', content, 'markdown');
         addLog('success', 'SECURITY.md generated.');
-        setIsCodeVisible(true); // Show file list
+        setIsCodeVisible(true); 
     } catch (e: any) {
         addLog('error', 'Audit failed: ' + e.message);
-    } finally {
-        setIsGenerating(false);
-    }
+    } finally { setIsGenerating(false); }
   };
 
   // --- IA Chat ---
@@ -409,7 +446,6 @@ export default function App() {
     setIsGenerating(true);
     const userPromptText = prompt;
     
-    // Ajout du message utilisateur à l'historique
     const userMsg: ChatMessage = { 
         role: 'user', 
         content: userPromptText, 
@@ -419,7 +455,7 @@ export default function App() {
     setChatHistory(prev => [...prev, userMsg]);
     
     setPrompt('');
-    setAttachedImage(null); // Reset image after send
+    setAttachedImage(null); 
 
     const currentCode = getActiveFileContent();
     const assistantRules = files.find(f => f.name === '.assistantrules')?.content || '';
@@ -428,7 +464,6 @@ export default function App() {
     systemPrompt += `\nITERATION MODE: Modify the current code based on the request. RETURN THE FULL CODE.`;
     if (settings.thinkingMode) systemPrompt += "\nUse Chain of Thought.\n";
 
-    // IMPORTANT : On donne tout le contexte des fichiers pour que l'IA comprenne le Full Stack
     const fullContext = files.map(f => `// --- File: ${f.name} ---\n${f.content}`).join('\n\n');
     let fullPrompt = `Files Context:\n${fullContext}\n\nCURRENT FILE FOCUSED: ${files[activeFileIndex].name}\n\nRequest : ${userMsg.content}`;
     
@@ -466,17 +501,12 @@ export default function App() {
            addLog('error', 'Security : Secrets detected.');
            setChatHistory(prev => [...prev, { role: 'assistant', content: "Code blocked (secrets detected).", thinking: thinkingContent, timestamp: Date.now() }]);
         } else {
-            // -- LOGIQUE DE CIBLAGE DE FICHIER AMÉLIORÉE --
             let targetFileIndex = activeFileIndex;
             const activeFile = files[activeFileIndex];
 
-            // Heuristique : si le code généré est du backend
             if (extractedCode.includes("import express") || extractedCode.includes("require('express')")) {
-                // Si l'utilisateur est déjà sur un fichier backend, on reste dessus (pour permettre l'édition de modules)
                 if (activeFile.name.startsWith('server/')) {
-                    // On garde targetFileIndex tel quel
                 } else {
-                    // Sinon on cherche un point d'entrée par défaut
                     const serverIdx = files.findIndex(f => f.name.includes('server/index') || f.name.includes('server/app'));
                     if (serverIdx !== -1) {
                         targetFileIndex = serverIdx;
@@ -484,7 +514,6 @@ export default function App() {
                     }
                 }
             } else if (extractedCode.includes("export default function App") || extractedCode.includes("react-dom/client")) {
-                // Si c'est le point d'entrée React
                 const appIdx = files.findIndex(f => f.name.includes('src/App') || f.name === 'App.tsx');
                 if (appIdx !== -1) {
                     targetFileIndex = appIdx;
@@ -499,7 +528,6 @@ export default function App() {
             createVersion(extractedCode, userPromptText);
             addLog('success', `v${versions.length + 1} applied to ${newFiles[targetFileIndex].name}.`);
             
-            // Si on a changé un autre fichier que celui visible, on switch
             if (targetFileIndex !== activeFileIndex) {
                 setActiveFileIndex(targetFileIndex);
             }
@@ -518,8 +546,6 @@ export default function App() {
 
   const handleSaveConfig = (newSettings: Settings) => { setSettings(newSettings); initConnection(newSettings); };
 
-  // --- Composants Internes de Layout ---
-  
   const sidebarContent = (
     <div className="h-full bg-slate-950 flex flex-col border-r border-slate-800">
         {/* Header Sidebar */}
@@ -531,16 +557,46 @@ export default function App() {
                 <h1 className="font-bold text-lg tracking-tight text-white">Vibe</h1>
             </div>
             <div className="flex gap-1">
-                <Tooltip content="Export ZIP (Full Stack)">
-                    <button onClick={handleExport} className="p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors">
-                        <Download size={18} />
-                    </button>
-                </Tooltip>
+                {/* IMPORT HIDDEN INPUT */}
+                <input 
+                    type="file" 
+                    ref={importInputRef} 
+                    onChange={handleImportFile} 
+                    accept=".json" 
+                    className="hidden" 
+                />
+
                 <Tooltip content="New Project">
                     <button onClick={createNewProject} className="p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors">
                         <Plus size={18} />
                     </button>
                 </Tooltip>
+                
+                <div className="w-[1px] h-4 bg-slate-700 mx-1"></div>
+
+                <Tooltip content="Import Project (JSON)">
+                    <button onClick={handleImportClick} className="p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-blue-400 transition-colors">
+                        <Upload size={18} />
+                    </button>
+                </Tooltip>
+                <Tooltip content="Backup Project (JSON)">
+                    <button onClick={handleBackupJson} className="p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-green-400 transition-colors">
+                        <Save size={18} />
+                    </button>
+                </Tooltip>
+                <Tooltip content="Export Deployment (ZIP)">
+                    <button onClick={handleExportZip} className="p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-orange-400 transition-colors">
+                        <Download size={18} />
+                    </button>
+                </Tooltip>
+                
+                {settings.github?.token && (
+                     <Tooltip content="Push to GitHub">
+                        <button onClick={handleGithubPush} className="p-1.5 hover:bg-slate-800 rounded text-slate-400 hover:text-purple-400 transition-colors ml-1">
+                            <Github size={18} />
+                        </button>
+                    </Tooltip>
+                )}
             </div>
         </div>
 

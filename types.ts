@@ -67,6 +67,13 @@ export interface Settings {
   // Config App
   privacyMode: boolean;
   autoTest: boolean;
+
+  // Config GitHub (Optionnel)
+  github?: {
+    token: string;
+    repo: string; // format: username/repo
+    branch?: string;
+  };
 }
 
 export interface TerminalLog {
@@ -82,4 +89,15 @@ export interface CodeVersion {
   description: string; // Le prompt qui a généré cette version
   code: string;
   timestamp: number;
+}
+
+// Interface pour le fichier de sauvegarde complet (.vibe / .json)
+export interface ProjectBackup {
+    version: 1;
+    timestamp: number;
+    project: Project;
+    chatHistory: ChatMessage[];
+    versions: CodeVersion[];
+    settings: Settings;
+    logs: TerminalLog[];
 }
